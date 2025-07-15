@@ -31,16 +31,25 @@ impl USBTransport {
     /// Instantiate a new [`USBTransport`].
     /// Only the first device with given vendor_id and product_id is returned.
     pub fn new(vendor_id: u16, product_id: u16) -> Result<Self> {
-        for device in rusb::devices()?.iter() {
+        log::debug!("Searching for USB device with vendor_id: {:#06x}, product_id: {:#06x}", vendor_id, product_id);
+        
+        let devices = rusb::devices()?;
+        log::debug!("Found {} USB devices to scan", devices.len());
+        
+        for device in devices.iter() {
             if let Ok(descriptor) = device.device_descriptor() {
+                log::debug!("Checking device - vendor_id: {:#06x}, product_id: {:#06x}", 
+                    descriptor.vendor_id(), descriptor.product_id());
+                
                 if descriptor.vendor_id() == vendor_id && descriptor.product_id() == product_id {
+                    log::debug!("Found matching USB device!");
                     return Ok(Self::new_from_device(device));
                 }
             }
         }
 
         Err(RustADBError::DeviceNotFound(format!(
-            "cannot find USB device with vendor_id={} and product_id={}",
+            "cannot find USB device with vendor_id={:#06x} and product_id={:#06x}",
             vendor_id, product_id
         )))
     }

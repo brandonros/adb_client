@@ -19,15 +19,29 @@ use crate::device::adb_transport_message::{AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AU
 use crate::{Result, RustADBError, USBTransport};
 
 pub fn read_adb_private_key<P: AsRef<Path>>(private_key_path: P) -> Result<Option<ADBRsaKey>> {
-    Ok(read_to_string(private_key_path.as_ref()).map(|pk| {
-        match ADBRsaKey::new_from_pkcs8(&pk) {
-            Ok(pk) => Some(pk),
-            Err(e) => {
-                log::error!("Error while create RSA private key: {e}");
-                None
+    let path = private_key_path.as_ref();
+    log::debug!("Attempting to read ADB private key from: {}", path.display());
+    
+    match read_to_string(path) {
+        Ok(pk) => {
+            log::debug!("Successfully read private key file");
+            match ADBRsaKey::new_from_pkcs8(&pk) {
+                Ok(pk) => {
+                    log::debug!("Successfully parsed RSA private key");
+                    Ok(Some(pk))
+                },
+                Err(e) => {
+                    log::error!("Error while parsing RSA private key: {e}");
+                    Ok(None)
+                }
             }
+        },
+        Err(e) => {
+            log::debug!("Could not read private key file '{}': {}", path.display(), e);
+            log::debug!("Will generate a random RSA key instead");
+            Ok(None)
         }
-    })?)
+    }
 }
 
 /// Search for adb devices with known interface class and subclass values
@@ -88,11 +102,15 @@ fn is_adb_device<T: UsbContext>(device: &Device<T>, des: &DeviceDescriptor) -> b
 }
 
 pub fn get_default_adb_key_path() -> Result<PathBuf> {
-    homedir::my_home()
+    let home = homedir::my_home()
         .ok()
         .flatten()
-        .map(|home| home.join(".android").join("adbkey"))
-        .ok_or(RustADBError::NoHomeDirectory)
+        .ok_or(RustADBError::NoHomeDirectory)?;
+    
+    let adb_key_path = home.join(".android").join("adbkey");
+    log::debug!("Default ADB key path: {}", adb_key_path.display());
+    
+    Ok(adb_key_path)
 }
 
 /// Represent a device reached and available over USB.
@@ -105,6 +123,7 @@ pub struct ADBUSBDevice {
 impl ADBUSBDevice {
     /// Instantiate a new [`ADBUSBDevice`]
     pub fn new(vendor_id: u16, product_id: u16) -> Result<Self> {
+        log::debug!("Creating ADBUSBDevice with vendor_id: {:#06x}, product_id: {:#06x}", vendor_id, product_id);
         Self::new_with_custom_private_key(vendor_id, product_id, get_default_adb_key_path()?)
     }
 
@@ -168,8 +187,10 @@ impl ADBUSBDevice {
 
     /// Send initial connect
     pub fn connect(&mut self) -> Result<()> {
+        log::debug!("Connecting to USB transport...");
         self.get_transport_mut().connect()?;
 
+        log::debug!("Sending initial CNXN message...");
         let message = ADBTransportMessage::new(
             MessageCommand::Cnxn,
             0x01000000,
@@ -179,14 +200,17 @@ impl ADBUSBDevice {
 
         self.get_transport_mut().write_message(message)?;
 
+        log::debug!("Waiting for device response...");
         let message = self.get_transport_mut().read_message()?;
         // If the device returned CNXN instead of AUTH it does not require authentication,
         // so we can skip the auth steps.
         if message.header().command() == MessageCommand::Cnxn {
+            log::debug!("Device accepted connection without authentication");
             return Ok(());
         }
         message.assert_command(MessageCommand::Auth)?;
 
+        log::debug!("Device requires authentication, received AUTH message");
         // At this point, we should have receive an AUTH message with arg0 == 1
         let auth_message = match message.header().arg0() {
             AUTH_TOKEN => message,
@@ -197,12 +221,15 @@ impl ADBUSBDevice {
             }
         };
 
+        log::debug!("Signing auth token...");
         let sign = self.private_key.sign(auth_message.into_payload())?;
 
+        log::debug!("Sending AUTH signature...");
         let message = ADBTransportMessage::new(MessageCommand::Auth, AUTH_SIGNATURE, 0, &sign);
 
         self.get_transport_mut().write_message(message)?;
 
+        log::debug!("Waiting for AUTH response...");
         let received_response = self.get_transport_mut().read_message()?;
 
         if received_response.header().command() == MessageCommand::Cnxn {
@@ -213,6 +240,7 @@ impl ADBUSBDevice {
             return Ok(());
         }
 
+        log::debug!("Signature authentication failed, sending public key...");
         let mut pubkey = self.private_key.android_pubkey_encode()?.into_bytes();
         pubkey.push(b'\0');
 
@@ -220,12 +248,22 @@ impl ADBUSBDevice {
 
         self.get_transport_mut().write_message(message)?;
 
+        log::info!("Waiting for authorization from Android device...");
+        log::info!("Please check your device screen and accept the USB debugging authorization if prompted.");
+        log::debug!("Waiting for final AUTH response with 30 second timeout...");
         let response = self
             .get_transport_mut()
-            .read_message_with_timeout(Duration::from_secs(10))
+            .read_message_with_timeout(Duration::from_secs(30))
             .and_then(|message| {
                 message.assert_command(MessageCommand::Cnxn)?;
                 Ok(message)
+            })
+            .map_err(|e| {
+                log::error!("Authentication timeout - please check that:");
+                log::error!("1. USB debugging is enabled on your Android device");
+                log::error!("2. You've accepted the USB debugging authorization dialog");
+                log::error!("3. Your device is unlocked and accessible");
+                e
             })?;
 
         log::info!(
