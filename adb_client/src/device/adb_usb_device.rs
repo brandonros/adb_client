@@ -2,7 +2,7 @@ use rusb::Device;
 use rusb::DeviceDescriptor;
 use rusb::UsbContext;
 use rusb::constants::LIBUSB_CLASS_VENDOR_SPEC;
-use std::fs::read_to_string;
+use std::fs::{create_dir_all, read_to_string, write};
 use std::io::Read;
 use std::io::Write;
 use std::path::Path;
@@ -42,6 +42,23 @@ pub fn read_adb_private_key<P: AsRef<Path>>(private_key_path: P) -> Result<Optio
             Ok(None)
         }
     }
+}
+
+pub fn save_adb_private_key<P: AsRef<Path>>(private_key: &ADBRsaKey, private_key_path: P) -> Result<()> {
+    let path = private_key_path.as_ref();
+    log::debug!("Saving ADB private key to: {}", path.display());
+    
+    // Create parent directory if it doesn't exist
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+        log::debug!("Created directory: {}", parent.display());
+    }
+    
+    let pem_content = private_key.to_pkcs8_pem()?;
+    write(path, pem_content)?;
+    log::info!("Successfully saved ADB private key to: {}", path.display());
+    
+    Ok(())
 }
 
 /// Search for adb devices with known interface class and subclass values
@@ -153,9 +170,18 @@ impl ADBUSBDevice {
         transport: USBTransport,
         private_key_path: PathBuf,
     ) -> Result<Self> {
-        let private_key = match read_adb_private_key(private_key_path)? {
+        let private_key = match read_adb_private_key(&private_key_path)? {
             Some(pk) => pk,
-            None => ADBRsaKey::new_random()?,
+            None => {
+                log::info!("Generating new random ADB private key");
+                let new_key = ADBRsaKey::new_random()?;
+                if let Err(e) = save_adb_private_key(&new_key, &private_key_path) {
+                    log::warn!("Failed to save generated ADB private key: {}", e);
+                } else {
+                    log::info!("Successfully saved new ADB private key to: {}", private_key_path.display());
+                }
+                new_key
+            },
         };
 
         let mut s = Self {

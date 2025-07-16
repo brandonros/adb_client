@@ -3,7 +3,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use num_bigint::{BigUint, ModInverse};
 use num_traits::FromPrimitive;
 use num_traits::cast::ToPrimitive;
-use rsa::pkcs8::DecodePrivateKey;
+use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use rsa::traits::PublicKeyParts;
 use rsa::{Pkcs1v15Sign, RsaPrivateKey};
 
@@ -107,6 +107,10 @@ impl ADBRsaKey {
         Ok(self
             .private_key
             .sign(Pkcs1v15Sign::new::<sha1::Sha1>(), msg.as_ref())?)
+    }
+
+    pub fn to_pkcs8_pem(&self) -> Result<String> {
+        Ok(self.private_key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)?.to_string())
     }
 }
 
